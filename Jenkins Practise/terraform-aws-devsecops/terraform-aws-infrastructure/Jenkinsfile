@@ -1,0 +1,141 @@
+pipeline {
+    agent any {}
+
+    parameters {
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['dev', 'qa', 'prod'],
+            description: 'Select target environment'
+        )
+    }
+
+    environment {
+        AWS_DEFAULT_REGION = 'ap-south-1'
+        TF_IN_AUTOMATION   = 'true'
+        TF_INPUT           = 'false'
+    }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        timeout(time: 90, unit: 'MINUTES')
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Terraform Format') {
+            steps {
+                sh 'terraform fmt -check -recursive'
+            }
+        }
+
+        stage('Terraform Init') {
+            steps {
+                sshagent(credentials: ['terraform-modules-deploy-key']) {
+                    sh '''
+                        set -eu
+                        terraform init \
+                          -input=false \
+                          -reconfigure \
+                          -lockfile=readonly \
+                          -backend-config="environments/${ENVIRONMENT}/backend.hcl"
+                    '''
+                }
+            }
+        }
+
+        stage('Terraform Validate') {
+            steps {
+                sh 'terraform validate'
+            }
+        }
+
+        stage('Checkov IaC Scan') {
+            steps {
+                sh '''
+                    checkov --directory . \
+                      --framework terraform \
+                      --config-file .checkov.yaml \
+                      --output cli \
+                      --output junitxml \
+                      --output-file-path console,checkov-report.xml
+                '''
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: 'checkov-report.xml'
+                    archiveArtifacts artifacts: 'checkov-report.xml', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Terraform Plan') {
+            steps {
+                sshagent(credentials: ['terraform-modules-deploy-key']) {
+                    sh '''
+                        set -eu
+                        terraform plan \
+                          -input=false \
+                          -var-file="environments/${ENVIRONMENT}/terraform.tfvars" \
+                          -out=tfplan
+                        terraform show -no-color tfplan > terraform-plan.txt
+                    '''
+                }
+                archiveArtifacts artifacts: 'terraform-plan.txt', fingerprint: true
+            }
+        }
+
+        stage('Approval') {
+            steps {
+                script {
+                    if (params.ENVIRONMENT == 'prod') {
+                        timeout(time: 30, unit: 'MINUTES') {
+                            input(
+                                message: 'Approve the reviewed Terraform plan for PRODUCTION?',
+                                ok: 'Approve',
+                                submitter: 'aws-prod-approvers'
+                            )
+                        }
+                    } else {
+                        timeout(time: 15, unit: 'MINUTES') {
+                            input(
+                                message: "Approve Terraform apply for ${params.ENVIRONMENT}?",
+                                ok: 'Approve'
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Terraform Apply') {
+            steps {
+                sh 'terraform apply -input=false -auto-approve tfplan'
+            }
+        }
+
+        stage('Outputs') {
+            steps {
+                sh 'terraform output'
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Infrastructure deployment completed for ${params.ENVIRONMENT}."
+        }
+        failure {
+            echo 'Pipeline failed. Review the stage logs and security report.'
+        }
+        always {
+            cleanWs()
+        }
+    }
+}

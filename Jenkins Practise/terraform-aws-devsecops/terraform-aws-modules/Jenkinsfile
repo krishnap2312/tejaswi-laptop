@@ -1,0 +1,62 @@
+pipeline {
+    agent { label 'terraform-agent' }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Terraform Format') {
+            steps {
+                sh 'terraform fmt -check -recursive'
+            }
+        }
+
+        stage('Validate Modules') {
+            steps {
+                sh '''
+                    set -eu
+                    for module_dir in modules/*; do
+                      [ -d "$module_dir" ] || continue
+                      echo "Validating $module_dir"
+                      terraform -chdir="$module_dir" init -backend=false -input=false
+                      terraform -chdir="$module_dir" validate
+                    done
+                '''
+            }
+        }
+
+        stage('Checkov') {
+            steps {
+                sh '''
+                    checkov --directory modules \
+                      --framework terraform \
+                      --config-file .checkov.yaml \
+                      --output cli \
+                      --output junitxml \
+                      --output-file-path console,checkov-report.xml
+                '''
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: 'checkov-report.xml'
+                    archiveArtifacts artifacts: 'checkov-report.xml', allowEmptyArchive: true
+                }
+            }
+        }
+    }
+
+    post {
+        success { echo 'Module validation and security checks passed.' }
+        failure { echo 'Module CI failed. Do not release this revision.' }
+        always { cleanWs() }
+    }
+}

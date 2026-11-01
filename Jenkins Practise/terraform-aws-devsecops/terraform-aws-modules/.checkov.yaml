@@ -1,0 +1,4 @@
+# Keep security checks blocking. Add approved, time-bound exceptions only
+# with a documented security review.
+framework:
+  - terraform

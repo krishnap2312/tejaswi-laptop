@@ -1,0 +1,4 @@
+framework:
+  - terraform
+# Keep all checks blocking by default. Add skip-check entries only after
+# documented security review and approval.
