@@ -1,1 +1,0 @@
-key = "qa/devsecops-demo/terraform.tfstate"
